@@ -32,7 +32,7 @@ def setupPraw():  # logger):
 
 # show post title with most stars
 def showPostTitleWithMostStars(r):
-    for submission in r.subreddit("all").hot(limit=25):
+    for submission in r.subreddit("all").hot(limit=10):
         print(submission.title)
         print(submission.score)
         print("\n")

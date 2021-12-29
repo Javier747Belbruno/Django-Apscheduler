@@ -6,66 +6,122 @@ from django.conf import settings
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from django.core.management.base import BaseCommand
-from django_apscheduler.jobstores import DjangoJobStore
-from django_apscheduler.models import DjangoJobExecution
-from django_apscheduler import util
 from apptest.util import setupPraw, showPostTitleWithMostStars
-
-logger = logging.getLogger(__name__)
-
-
-def my_job():
-    r = setupPraw()
-    showPostTitleWithMostStars(r)
-    pass
+import datetime
+from time import sleep
+from signal import SIGBREAK, signal, SIGTERM
+import os
+from apptest.models import MessageCount
 
 
-# The `close_old_connections` decorator ensures that database connections, that have become
-# unusable or are obsolete, are closed before and after our job has run.
-@util.close_old_connections
-def delete_old_job_executions(max_age=604_800):
-    """
-    This job deletes APScheduler job execution entries older than `max_age` from the database.
-    It helps to prevent the database from filling up with old historical records that are no
-    longer useful.
+def getTimestamp():
+    dt = (
+        str(datetime.datetime.now().month)
+        + "/"
+        + str(datetime.datetime.now().day)
+        + " "
+    )
+    hr = (
+        str(datetime.datetime.now().hour)
+        if len(str(datetime.datetime.now().hour)) > 1
+        else "0" + str(datetime.datetime.now().hour)
+    )
+    min = (
+        str(datetime.datetime.now().minute)
+        if len(str(datetime.datetime.now().minute)) > 1
+        else "0" + str(datetime.datetime.now().minute)
+    )
+    t = "[" + hr + ":" + min + "] "
+    return dt + t
 
-    :param max_age: The maximum length of time to retain historical job execution records.
-                    Defaults to 7 days.
-    """
-    DjangoJobExecution.objects.delete_old_job_executions(max_age)
+
+def checkUnreadMessages(reddit):
+    # Check for new mail
+    count = 0
+    for msg in reddit.inbox.unread(limit=None):
+        # msg.mark_read()
+        count = count + 1
+
+        subrredit_string = msg.subject.strip()
+    # persist message count
+    try:
+        MessageCount.objects.create(
+            count=count,
+            created_at=datetime.datetime.now(),
+        )
+    except Exception as e:
+        print(getTimestamp() + "Error: " + str(e))
+    return count
+
+
+def loop(logger, reddit):
+    # Every minute, check mail, create new threads, update all current threads
+    running = True
+    retries = 0
+    while running:
+        try:
+            count = checkUnreadMessages(reddit)
+            print(
+                getTimestamp()
+                + "Checked for new messages. "
+                + str(count)
+                + " messages found."
+            )
+            showPostTitleWithMostStars(reddit)
+            retries = 0
+            sleep(60)
+        except KeyboardInterrupt:
+            logger.warning("[MANUAL SHUTDOWN]")
+            # Only for development purposes - allows you to stop the server by pressing Ctrl+C
+            # Works on Windows, so I dont know if it works on Linux
+            print(
+                getTimestamp()
+                + "[MANUAL SHUTDOWN] - PID "
+                + str(os.getpid())
+                + " is shut down. \n"
+            )
+            os.kill(os.getpid(), SIGBREAK)
+            #################
+
+            # Prod code
+            # running = False
+
+        except UnicodeDecodeError:
+            retries += 1
+            print(
+                getTimestamp()
+                + "UnicodeDecodeError, check log file [retries = "
+                + str(retries)
+                + "]"
+            )
+            logger.exception("[UNICODE ERROR:]")
+            # flushMsgs()
+        except UnicodeEncodeError:
+            retries += 1
+            print(
+                getTimestamp()
+                + "UnicodeEncodeError, check log file [retries = "
+                + str(retries)
+                + "]"
+            )
+            logger.exception("[UNICODE ERROR:]")
+            # flushMsgs()
+        except Exception:
+            retries += 1
+            print(
+                getTimestamp()
+                + "Unknown error, check log file [retries = "
+                + str(retries)
+                + "]"
+            )
+            logger.exception("[UNKNOWN ERROR:]")
+            sleep(60)
 
 
 class Command(BaseCommand):
     help = "Runs APScheduler."
 
     def handle(self, *args, **options):
-        scheduler = BlockingScheduler(timezone=settings.TIME_ZONE)
-        scheduler.add_jobstore(DjangoJobStore(), "default")
-
-        scheduler.add_job(
-            my_job,
-            trigger=CronTrigger(minute="*/1"),  # Every 1 #minute
-            id="my_job",  # The `id` assigned to each job MUST be unique
-            max_instances=1,
-            replace_existing=True,
-        )
-        logger.info("Added job 'my_job'.")
-
-        scheduler.add_job(
-            delete_old_job_executions,
-            trigger=CronTrigger(
-                day_of_week="mon", hour="00", minute="00"
-            ),  # Midnight on Monday, before start of the next work week.
-            id="delete_old_job_executions",
-            max_instances=1,
-            replace_existing=True,
-        )
-        logger.info("Added weekly job: 'delete_old_job_executions'.")
-
-        try:
-            logger.info("Starting scheduler...")
-            scheduler.start()
-        except KeyboardInterrupt:
-            logger.info("Stopping scheduler...")
-            scheduler.shutdown()
-            logger.info("Scheduler shut down successfully!")
+        reddit = setupPraw()
+        logger = logging.getLogger("loop")
+        loop(logger, reddit)
